@@ -122,6 +122,7 @@ bun test src/__tests__/manifest.test.ts
 - `do-min-size.test.ts` — DigitalOcean minimum droplet size enforcement: `slugRamGb` RAM comparison, `AGENT_MIN_SIZE` map
 - `do-payment-warning.test.ts` — `ensureDoToken` proactive payment method reminder for first-time DigitalOcean users
 - `readiness-checklist.test.ts` — `checklistLineStatus` mapping for DigitalOcean readiness rows
+- `readiness.test.ts` — `sortBlockers` resolution order for DigitalOcean readiness blockers
 - `do-snapshot.test.ts` — `findSpawnSnapshot`: DigitalOcean snapshot lookup, filtering, error handling
 - `hetzner-pagination.test.ts` — Hetzner API pagination: multi-page server listing and cursor handling
 - `sprite-keep-alive.test.ts` — `installSpriteKeepAlive` download/install, graceful failure, session script wrapping

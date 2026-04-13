@@ -30,16 +30,17 @@ export interface ReadinessState {
   blockers: ReadinessBlockerCode[];
 }
 
+/** Resolution order: fix billing before SSH registration — DO often rejects key upload until payment is set up. */
 const BLOCKER_ORDER: ReadinessBlockerCode[] = [
   "do_auth",
   "email_unverified",
-  "ssh_missing",
   "payment_required",
+  "ssh_missing",
   "openrouter_missing",
   "droplet_limit",
 ];
 
-function sortBlockers(codes: ReadinessBlockerCode[]): ReadinessBlockerCode[] {
+export function sortBlockers(codes: ReadinessBlockerCode[]): ReadinessBlockerCode[] {
   const uniq = [
     ...new Set(codes),
   ];
@@ -157,6 +158,8 @@ async function resolveFirstBlocker(first: ReadinessBlockerCode, agentName: strin
  */
 export async function runDigitalOceanReadinessGate(opts: { agentName: string }): Promise<void> {
   const { agentName } = opts;
+  let previousTopBlocker: ReadinessBlockerCode | undefined;
+  let sameTopBlockerRepeats = 0;
 
   for (;;) {
     const state = await evaluateDigitalOceanReadiness(agentName);
@@ -185,6 +188,23 @@ export async function runDigitalOceanReadinessGate(opts: { agentName: string }):
     const first = state.blockers[0];
     if (!first) {
       break;
+    }
+
+    if (first === previousTopBlocker) {
+      sameTopBlockerRepeats++;
+    } else {
+      sameTopBlockerRepeats = 0;
+    }
+    previousTopBlocker = first;
+
+    if (sameTopBlockerRepeats >= 2) {
+      logError(
+        "Readiness is still blocked after several attempts. " +
+          "If DigitalOcean rejected SSH key upload, add a payment method first or register your public key in Account → Security.",
+      );
+      logInfo(`Billing: ${DIGITALOCEAN_BILLING_ADD_PAYMENT_URL}`);
+      await prompt("Press Enter after you've addressed this to re-check...");
+      sameTopBlockerRepeats = 0;
     }
 
     p.log.warn(`Blocked: ${first.replace(/_/g, " ")}`);
