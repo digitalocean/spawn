@@ -71,18 +71,16 @@ bash <(curl -fsSL https://openrouter.ai/labs/spawn/digitalocean/pi.sh)
 
 ### Reset local state
 
-To drop saved DigitalOcean credentials and optional shell variables while developing or testing, use [`reset-local-state.sh`](reset-local-state.sh). It deletes `~/.config/spawn/digitalocean.json`.
+To drop saved DigitalOcean and OpenRouter credentials and optional shell variables while developing or testing, use [`reset-local-state.sh`](reset-local-state.sh). It deletes `~/.config/spawn/digitalocean.json` and `~/.config/spawn/openrouter.json`.
 
 ```bash
-# Remove the saved token file (enough for a clean OAuth/API flow next run)
+# Remove the saved token files (enough for a clean OAuth/API flow next run)
 bash sh/digitalocean/reset-local-state.sh
 
-# Also clear DO-related env vars in this shell (bash: source; otherwise paste the
+# Also clear DO/OpenRouter-related env vars in this shell (bash: source; otherwise paste the
 # `unset` line printed when you run the script without sourcing).
 source sh/digitalocean/reset-local-state.sh
 ```
-
-To clear OpenRouter credentials stored by the CLI as well, remove `~/.config/spawn/openrouter.json` manually.
 
 ### Pre-flight readiness
 

@@ -120,7 +120,7 @@ bun test src/__tests__/manifest.test.ts
 - `gateway-resilience.test.ts` — `startGateway` systemd unit with auto-restart and cron heartbeat
 - `digitalocean-token.test.ts` — DigitalOcean token storage, retrieval, and API client helpers
 - `do-min-size.test.ts` — DigitalOcean minimum droplet size enforcement: `slugRamGb` RAM comparison, `AGENT_MIN_SIZE` map
-- `do-payment-warning.test.ts` — `ensureDoToken` proactive payment method reminder for first-time DigitalOcean users
+- `do-payment-warning.test.ts` — `ensureDoToken` does not preemptively warn about payment; billing URL covered via `handleBillingError` tests
 - `readiness-checklist.test.ts` — `checklistLineStatus` mapping for DigitalOcean readiness rows
 - `readiness.test.ts` — `sortBlockers` resolution order for DigitalOcean readiness blockers
 - `do-snapshot.test.ts` — `findSpawnSnapshot`: DigitalOcean snapshot lookup, filtering, error handling

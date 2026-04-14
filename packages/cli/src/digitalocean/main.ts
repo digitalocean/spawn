@@ -12,7 +12,6 @@ import {
   AGENT_MIN_SIZE,
   createServer as createDroplet,
   downloadFile,
-  ensureDoToken,
   getConnectionInfo,
   getServerName,
   interactiveSession,
@@ -63,7 +62,6 @@ async function main() {
     },
     async authenticate() {
       await promptSpawnName();
-      await ensureDoToken();
     },
     async ensureReadyBeforeSizing() {
       await runDigitalOceanReadinessGate({

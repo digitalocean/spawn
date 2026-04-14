@@ -297,7 +297,11 @@ export async function runOrchestration(
   agentName: string,
   options?: OrchestrationOptions,
 ): Promise<void> {
-  logInfo(`${agent.name} on ${cloud.cloudLabel}`);
+  if (cloud.cloudName === "digitalocean") {
+    logStep(`Starting guided ${agent.name} on ${cloud.cloudLabel}`);
+  } else {
+    logInfo(`${agent.name} on ${cloud.cloudLabel}`);
+  }
   process.stderr.write("\n");
 
   const orchestrationResult = await asyncTryCatch(async () => {

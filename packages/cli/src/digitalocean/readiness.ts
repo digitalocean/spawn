@@ -7,6 +7,7 @@ import { logError, logInfo, logStep, openBrowser, prompt } from "../shared/ui.js
 import { DIGITALOCEAN_BILLING_ADD_PAYMENT_URL, digitaloceanBilling } from "./billing.js";
 import {
   areSshKeysRegisteredOnDigitalOcean,
+  ensureDoToken,
   ensureSshKey,
   fetchDoAccountSnapshot,
   getDropletCount,
@@ -117,8 +118,8 @@ export async function evaluateDigitalOceanReadiness(_agentName: string): Promise
 async function resolveFirstBlocker(first: ReadinessBlockerCode, agentName: string): Promise<void> {
   switch (first) {
     case "do_auth": {
-      logError("DigitalOcean account could not be verified. Check your API token and try again.");
-      await prompt("Press Enter after updating credentials to re-check...");
+      logStep("Connect your DigitalOcean account...");
+      await ensureDoToken();
       break;
     }
     case "droplet_limit": {
@@ -207,7 +208,9 @@ export async function runDigitalOceanReadinessGate(opts: { agentName: string }):
       sameTopBlockerRepeats = 0;
     }
 
-    p.log.warn(`Blocked: ${first.replace(/_/g, " ")}`);
+    if (first !== "do_auth") {
+      p.log.warn(`Blocked: ${first.replace(/_/g, " ")}`);
+    }
     await resolveFirstBlocker(first, agentName);
   }
 
