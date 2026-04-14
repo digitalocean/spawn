@@ -112,6 +112,7 @@ describe("ensureDoToken — payment method warning for first-time users", () => 
     const warnMessages = warnSpy.mock.calls.map((c: unknown[]) => String(c[0]));
     const billingWarning = warnMessages.find((msg: string) => msg.includes("billing"));
     expect(billingWarning).toBeDefined();
-    expect(billingWarning).toContain("https://cloud.digitalocean.com/account/billing");
+    expect(billingWarning).toContain("open-add-payment-method=true");
+    expect(billingWarning).toContain("defer-onboarding-for=or");
   });
 });
