@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import * as p from "@clack/prompts";
 import { getErrorMessage, isNumber, isString, toObjectArray, toRecord } from "@openrouter/spawn-shared";
+import { isInteractiveTTY } from "../commands/shared.js";
 import { handleBillingError, isBillingError, showNonBillingError } from "../shared/billing-guidance.js";
 import { getPackagesForTier, NODE_INSTALL_CMD, needsBun, needsNode } from "../shared/cloud-init.js";
 import { generateCsrfState, OAUTH_CSS } from "../shared/oauth.js";
@@ -731,11 +732,73 @@ async function tryDoOAuth(): Promise<string | null> {
   logStep("Opening browser to authorize with DigitalOcean...");
   openBrowser(authUrl);
 
-  // Wait up to 120 seconds
-  logStep("Waiting for authorization in browser (timeout: 120s)...");
-  const deadline = Date.now() + 120_000;
-  while (!oauthCode && !oauthDenied && Date.now() < deadline) {
+  // Initial wait window (after this, interactive TTY keeps the OAuth server up until callback or Escape)
+  logStep("Waiting for authorization in browser (extended-wait hint after 120s)...");
+  const initialDeadline = Date.now() + 120_000;
+  while (!oauthCode && !oauthDenied && Date.now() < initialDeadline) {
     await sleep(500);
+  }
+
+  if (!oauthCode && !oauthDenied && process.env.SPAWN_NON_INTERACTIVE === "1") {
+    server.stop(true);
+    logError("OAuth authentication timed out after 120 seconds");
+    logError("Alternative: Use a manual API token instead");
+    logError("  export DIGITALOCEAN_ACCESS_TOKEN=dop_v1_...");
+    return null;
+  }
+
+  // Past the initial window without callback: keep OAuth server up and keep waiting
+  let manualTokenRequested = false;
+  if (!oauthCode && !oauthDenied) {
+    logWarn("Still waiting for you to complete authorization in your browser.");
+    if (isInteractiveTTY()) {
+      logInfo("Press Escape to enter a DigitalOcean API token instead.");
+
+      let pendingEscTimer: ReturnType<typeof setTimeout> | null = null;
+      const onData = (data: Buffer | string) => {
+        const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
+        if (buf.length === 0) {
+          return;
+        }
+        if (pendingEscTimer) {
+          clearTimeout(pendingEscTimer);
+          pendingEscTimer = null;
+          return;
+        }
+        if (buf[0] === 0x1b && buf.length === 1) {
+          pendingEscTimer = setTimeout(() => {
+            pendingEscTimer = null;
+            manualTokenRequested = true;
+          }, 75);
+          return;
+        }
+        if (buf[0] === 0x1b && buf.length > 1 && (buf[1] === 0x5b || buf[1] === 0x4f)) {
+          return;
+        }
+      };
+
+      process.stdin.resume();
+      process.stdin.setRawMode?.(true);
+      process.stdin.on("data", onData);
+      const waitResult = await asyncTryCatch(async () => {
+        while (!oauthCode && !oauthDenied && !manualTokenRequested) {
+          await sleep(500);
+        }
+      });
+      if (pendingEscTimer) {
+        clearTimeout(pendingEscTimer);
+      }
+      process.stdin.off("data", onData);
+      process.stdin.setRawMode?.(false);
+      process.stdin.pause();
+      if (!waitResult.ok) {
+        throw waitResult.error;
+      }
+    } else {
+      while (!oauthCode && !oauthDenied) {
+        await sleep(500);
+      }
+    }
   }
 
   server.stop(true);
@@ -747,8 +810,13 @@ async function tryDoOAuth(): Promise<string | null> {
     return null;
   }
 
+  if (manualTokenRequested) {
+    logInfo("Switching to manual API token entry.");
+    return null;
+  }
+
   if (!oauthCode) {
-    logError("OAuth authentication timed out after 120 seconds");
+    logError("OAuth authentication did not complete");
     logError("Alternative: Use a manual API token instead");
     logError("  export DIGITALOCEAN_ACCESS_TOKEN=dop_v1_...");
     return null;
