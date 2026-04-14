@@ -107,7 +107,11 @@ const DO_SCOPES = [
   "sizes:read",
   "image:read",
   "actions:read",
+  "tag:create",
 ].join(" ");
+
+/** Droplet tag for Spawn-sourced attribution (API name: letters, numbers, colons, dashes, underscores). */
+export const SPAWN_DIGITALOCEAN_ATTRIBUTION_TAG = "spawn";
 
 const DO_OAUTH_CALLBACK_PORT = 5190;
 
@@ -330,6 +334,81 @@ async function testDoToken(): Promise<boolean> {
   );
 }
 
+/** Parsed /v2/account fields for readiness checks (single source for snapshot). */
+export interface DoAccountSnapshot {
+  status: string;
+  email_verified: boolean | undefined;
+  droplet_limit: number;
+}
+
+/** Fetch account record for readiness (requires valid `_state.token`). */
+export async function fetchDoAccountSnapshot(): Promise<DoAccountSnapshot | null> {
+  if (!_state.token) {
+    return null;
+  }
+  const r = await asyncTryCatch(async () => {
+    const text = await doApi("GET", "/account", undefined, 1);
+    const data = parseJsonObj(text);
+    const rec = toRecord(data?.account);
+    if (!rec) {
+      return null;
+    }
+    const ev = rec.email_verified;
+    return {
+      status: isString(rec.status) ? rec.status : "",
+      email_verified: ev === false ? false : ev === true ? true : undefined,
+      droplet_limit: isNumber(rec.droplet_limit) ? rec.droplet_limit : 0,
+    };
+  });
+  return r.ok ? r.data : null;
+}
+
+/**
+ * True if at least one local SSH key fingerprint is registered on the DO account.
+ */
+export async function areSshKeysRegisteredOnDigitalOcean(): Promise<boolean> {
+  if (!_state.token) {
+    return false;
+  }
+  const selectedKeys = await ensureSshKeys();
+  if (selectedKeys.length === 0) {
+    return false;
+  }
+  const keys = await doGetAll("/account/keys", "ssh_keys");
+  for (const key of selectedKeys) {
+    const fingerprint = getSshFingerprint(key.pubPath);
+    if (!fingerprint) {
+      continue;
+    }
+    if (keys.some((k: Record<string, unknown>) => (k.fingerprint || "") === fingerprint)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Ensure attribution tag exists (ignore if already present or insufficient scope). */
+async function ensureSpawnAttributionTag(): Promise<void> {
+  await asyncTryCatch(() =>
+    doApi(
+      "POST",
+      "/tags",
+      JSON.stringify({
+        name: SPAWN_DIGITALOCEAN_ATTRIBUTION_TAG,
+      }),
+    ),
+  );
+}
+
+/** Current droplet count for quota checks (null on API failure). */
+export async function getDropletCount(): Promise<number | null> {
+  if (!_state.token) {
+    return null;
+  }
+  const r = await asyncTryCatch(() => doGetAll("/droplets", "droplets"));
+  return r.ok ? r.data.length : null;
+}
+
 // ─── Account Info & Switch ──────────────────────────────────────────────────
 
 async function getAccountInfo(): Promise<{
@@ -400,15 +479,13 @@ export async function checkAccountStatus(): Promise<void> {
     return;
   }
   const r = await asyncTryCatch(async () => {
-    const text = await doApi("GET", "/account", undefined, 1);
-    const data = parseJsonObj(text);
-    const rec = toRecord(data?.account);
-    if (!rec) {
+    const snapshot = await fetchDoAccountSnapshot();
+    if (!snapshot) {
       return;
     }
-    const status = isString(rec.status) ? rec.status : "";
-    const emailVerified = rec.email_verified;
-    const dropletLimit = isNumber(rec.droplet_limit) ? rec.droplet_limit : 0;
+    const status = snapshot.status;
+    const emailVerified = snapshot.email_verified;
+    const dropletLimit = snapshot.droplet_limit;
 
     if (status === "locked") {
       logWarn("Your DigitalOcean account is locked (usually a billing issue).");
@@ -786,7 +863,9 @@ export async function ensureDoToken(): Promise<boolean> {
   if (!saved && !envToken) {
     process.stderr.write("\n");
     logWarn("DigitalOcean requires a payment method before you can create servers.");
-    logWarn("If you haven't added one yet, visit: https://cloud.digitalocean.com/account/billing");
+    logWarn(
+      "If you haven't added one yet, visit: https://cloud.digitalocean.com/account/billing?defer-onboarding-for=or&open-add-payment-method=true",
+    );
     process.stderr.write("\n");
   }
 
@@ -1096,11 +1175,25 @@ export async function createServer(
     dropletConfig.user_data = getCloudInitUserdata(tier);
   }
 
-  const body = JSON.stringify(dropletConfig);
+  await ensureSpawnAttributionTag();
+  dropletConfig.tags = [
+    SPAWN_DIGITALOCEAN_ATTRIBUTION_TAG,
+  ];
+
+  let body = JSON.stringify(dropletConfig);
 
   // Wrap in asyncTryCatch so billing-related 403 errors thrown by doApi()
   // can be caught and handled before propagating as a generic "API error".
-  const createApiResult = await asyncTryCatch(() => doApi("POST", "/droplets", body));
+  let createApiResult = await asyncTryCatch(() => doApi("POST", "/droplets", body));
+  if (!createApiResult.ok && dropletConfig.tags) {
+    const tagErr = createApiResult.error.message;
+    if (/tag|scope|forbidden|403|unauthor/i.test(tagErr)) {
+      logWarn("Droplet tags unavailable for this token — creating without attribution tag.");
+      delete dropletConfig.tags;
+      body = JSON.stringify(dropletConfig);
+      createApiResult = await asyncTryCatch(() => doApi("POST", "/droplets", body));
+    }
+  }
   if (!createApiResult.ok) {
     const errMsg = createApiResult.error.message;
     logError(`Failed to create DigitalOcean droplet: ${errMsg}`);
