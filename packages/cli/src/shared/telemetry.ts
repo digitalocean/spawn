@@ -1,7 +1,9 @@
-// shared/telemetry.ts — PostHog telemetry for errors, warnings, and crashes.
+// shared/telemetry.ts — PostHog telemetry for errors, warnings, crashes, and
+// low-volume product events (funnel steps, spawn lifecycle).
 // Default on. Disable with SPAWN_TELEMETRY=0.
-// Strictly errors/warnings/crashes — no command tracking, no session events.
+// Never sends command args, file paths, or user prompt content.
 
+import { isString } from "@openrouter/spawn-shared";
 import { asyncTryCatch } from "./result.js";
 
 // Same PostHog project as feedback.ts
@@ -121,7 +123,14 @@ interface TelemetryEvent {
 
 // ── State ───────────────────────────────────────────────────────────────────
 
-let _enabled = true;
+// Telemetry is OPT-IN: nothing fires until initTelemetry() is called. This
+// matters for tests that import modules which call captureEvent — without
+// this default, every `bun test` run of orchestrate.test.ts fired real
+// PostHog events tagged agent=testagent, because the test imports
+// runOrchestration directly (bypassing index.ts's initTelemetry call) but
+// runOrchestration calls captureEvent unconditionally. Defaulting _enabled
+// to false means no events escape until a real process explicitly opts in.
+let _enabled = false;
 let _sessionId = "";
 let _context: Record<string, string> = {};
 const _events: TelemetryEvent[] = [];
@@ -131,6 +140,15 @@ let _flushScheduled = false;
 
 /** Initialize telemetry. Call once at startup. */
 export function initTelemetry(version: string): void {
+  // Never send telemetry from test environments. bun:test sets BUN_ENV=test,
+  // Node test runners set NODE_ENV=test. Without this guard, every CI run of
+  // orchestrate.test.ts fires real PostHog events tagged agent=testagent,
+  // polluting the onboarding funnel with fixture data. (See #3305 follow-up.)
+  if (process.env.NODE_ENV === "test" || process.env.BUN_ENV === "test") {
+    _enabled = false;
+    return;
+  }
+
   _enabled = process.env.SPAWN_TELEMETRY !== "0";
   if (!_enabled) {
     return;
@@ -175,6 +193,31 @@ export function captureWarning(message: string): void {
   pushEvent("cli_warning", {
     message: scrub(message),
   });
+}
+
+/**
+ * Capture a generic telemetry event (funnel steps, lifecycle events, etc.).
+ *
+ * Respects SPAWN_TELEMETRY=0 — when opt-out is set this is a no-op. All string
+ * values in `properties` are passed through the same scrubber as errors and
+ * warnings, so paths, API keys, emails, and IPs are redacted before upload.
+ *
+ * Intended for low-volume, high-signal product events like:
+ *   - funnel_* (onboarding pipeline drop-off tracking in orchestrate.ts)
+ *   - spawn_connected / spawn_deleted (lifecycle events)
+ *
+ * NOT intended for command tracking, keystroke tracking, or anything that
+ * could incidentally capture user-typed prompts or file paths.
+ */
+export function captureEvent(event: string, properties: Record<string, unknown> = {}): void {
+  if (!_enabled) {
+    return;
+  }
+  const scrubbed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    scrubbed[key] = isString(value) ? scrub(value) : value;
+  }
+  pushEvent(event, scrubbed);
 }
 
 /** Map our error types to PostHog mechanism types. */

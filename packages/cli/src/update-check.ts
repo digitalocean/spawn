@@ -25,6 +25,7 @@ export const executor = {
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const FETCH_TIMEOUT = 10000; // 10 seconds
+const MIN_INSTALL_SCRIPT_BYTES = 100; // reject suspiciously small scripts
 const UPDATE_BACKOFF_MS = 60 * 60 * 1000; // 1 hour
 const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour — skip network check if last success was recent
 
@@ -259,6 +260,39 @@ function reExecWithArgs(): void {
   }
 }
 
+/**
+ * Validate a downloaded install script before execution.
+ *
+ * Checks:
+ * 1. Non-empty and above a minimum size threshold (rejects truncated downloads)
+ * 2. Starts with the expected shebang / header for its platform
+ *
+ * Security note: This is NOT a substitute for cryptographic integrity
+ * verification (SHA256 checksum or code signing). The release pipeline does
+ * not currently publish checksums for the install script, so we rely on
+ * HTTPS (TLS) for transport integrity. These checks catch corruption or
+ * truncation, not a compromised CDN. See GitHub issue #3297.
+ */
+function validateInstallScript(content: string, platform: "unix" | "windows"): void {
+  if (content.length < MIN_INSTALL_SCRIPT_BYTES) {
+    throw new Error(
+      `Install script too small (${content.length} bytes, minimum ${MIN_INSTALL_SCRIPT_BYTES}). ` +
+        "Download may be corrupted or truncated.",
+    );
+  }
+
+  if (platform === "unix") {
+    if (!content.startsWith("#!/")) {
+      throw new Error("Install script missing expected shebang (#!/...). Download may be corrupted.");
+    }
+  } else {
+    // PowerShell scripts should contain recognizable PS content
+    if (!content.includes("$") && !content.includes("function")) {
+      throw new Error("Install script does not appear to be valid PowerShell. Download may be corrupted.");
+    }
+  }
+}
+
 function performAutoUpdate(latestVersion: string, jsonOutput = false): void {
   printUpdateBanner(latestVersion);
 
@@ -295,12 +329,25 @@ function performAutoUpdate(latestVersion: string, jsonOutput = false): void {
       },
     );
     const scriptContent = scriptBytes ? scriptBytes.toString() : "";
+    const platform = isWindows() ? "windows" : "unix";
+    validateInstallScript(scriptContent, platform);
 
-    if (isWindows()) {
-      // Windows: write to temp file and execute via PowerShell
-      const tmpFile = path.join(tmpdir(), `spawn-install-${Date.now()}.ps1`);
-      fs.writeFileSync(tmpFile, scriptContent);
-      const psResult = tryCatch(() =>
+    // Write install script to temp file, execute, and guarantee cleanup.
+    // Uses tryCatch so cleanup always runs before any error is re-thrown.
+    const tmpExt = isWindows() ? "ps1" : "sh";
+    const tmpFile = path.join(tmpdir(), `spawn-install-${Date.now()}.${tmpExt}`);
+    fs.writeFileSync(
+      tmpFile,
+      scriptContent,
+      isWindows()
+        ? undefined
+        : {
+            mode: 0o700,
+          },
+    );
+
+    const execResult = tryCatch(() => {
+      if (isWindows()) {
         executor.execFileSync(
           "powershell.exe",
           [
@@ -312,21 +359,8 @@ function performAutoUpdate(latestVersion: string, jsonOutput = false): void {
           {
             stdio: installStdio,
           },
-        ),
-      );
-      // Best-effort cleanup of temp file
-      tryCatchIf(isFileError, () => fs.unlinkSync(tmpFile));
-      if (!psResult.ok) {
-        throw psResult.error;
-      }
-    } else {
-      // macOS/Linux: write to temp file and execute via bash to avoid
-      // command injection and ARG_MAX limits (consistent with Windows path)
-      const tmpFile = path.join(tmpdir(), `spawn-install-${Date.now()}.sh`);
-      fs.writeFileSync(tmpFile, scriptContent, {
-        mode: 0o700,
-      });
-      const bashResult = tryCatch(() =>
+        );
+      } else {
         executor.execFileSync(
           "bash",
           [
@@ -335,13 +369,16 @@ function performAutoUpdate(latestVersion: string, jsonOutput = false): void {
           {
             stdio: installStdio,
           },
-        ),
-      );
-      // Best-effort cleanup of temp file
-      tryCatchIf(isFileError, () => fs.unlinkSync(tmpFile));
-      if (!bashResult.ok) {
-        throw bashResult.error;
+        );
       }
+    });
+
+    // Cleanup runs unconditionally — tryCatch above captures any exec error
+    // without short-circuiting, so we always reach this line.
+    tryCatchIf(isFileError, () => fs.unlinkSync(tmpFile));
+
+    if (!execResult.ok) {
+      throw execResult.error;
     }
   });
 
@@ -400,21 +437,36 @@ export async function checkForUpdates(jsonOutput = false): Promise<void> {
   // Record successful check so we don't hit the network again for an hour
   markUpdateChecked();
 
-  // Notify if newer version is available
+  // Notify (or auto-install) if a newer version is available.
   if (compareVersions(VERSION, latestVersion)) {
-    // Only auto-update within the same major.minor (patch updates only).
-    // e.g. 1.0.0 → 1.0.5 is allowed, 1.0.0 → 1.1.0 is not.
+    // Update policy, semver-aligned:
+    //
+    //   PATCH bumps (same major.minor, e.g. 1.0.5 → 1.0.7) are always
+    //   auto-installed. Patches are reserved for bug fixes and security
+    //   hardening — users benefit from getting them without opting in, and
+    //   the blast radius is bounded by semver: no behavior changes, no
+    //   breaking changes, no new features.
+    //
+    //   MINOR / MAJOR bumps (e.g. 1.0.x → 1.1.0, 1.x.x → 2.0.0) respect
+    //   SPAWN_AUTO_UPDATE=1 as opt-in. These can contain behavior changes
+    //   and users should decide when to move to them.
+    //
+    //   SPAWN_NO_AUTO_UPDATE=1 lets users opt OUT of patch-level auto-update
+    //   entirely if they need a fully pinned CLI (CI environments, etc.).
     const patchOnly = isSameMinor(VERSION, latestVersion);
+    const explicitOptOut = process.env.SPAWN_NO_AUTO_UPDATE === "1";
+    const explicitOptIn = process.env.SPAWN_AUTO_UPDATE === "1";
 
-    if (patchOnly && process.env.SPAWN_AUTO_UPDATE === "1") {
-      // Opt-in auto-update for patch versions
+    const shouldAutoInstall = !explicitOptOut && (patchOnly || explicitOptIn);
+
+    if (shouldAutoInstall) {
       const r = tryCatch(() => performAutoUpdate(latestVersion, jsonOutput));
       if (!r.ok) {
         logWarn("Auto-update encountered an error");
         logDebug(getErrorMessage(r.error));
       }
     } else {
-      // Show notice: either auto-update is off, or it's a minor/major bump
+      // Minor/major bump without opt-in, or explicit opt-out — show notice.
       printUpdateNotice(latestVersion);
     }
   }

@@ -11,6 +11,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { isString } from "@openrouter/spawn-shared";
 import * as v from "valibot";
 
 // ── Schemas for validating PostHog payloads ─────────────────────────────────
@@ -104,13 +105,21 @@ function getFirstExceptionEntry(
 describe("telemetry", () => {
   let originalFetch: typeof global.fetch;
   let originalTelemetry: string | undefined;
+  let originalBunEnv: string | undefined;
+  let originalNodeEnv: string | undefined;
   let fetchMock: ReturnType<typeof mock>;
 
   beforeEach(() => {
     originalFetch = global.fetch;
     originalTelemetry = process.env.SPAWN_TELEMETRY;
-    // Enable telemetry
+    originalBunEnv = process.env.BUN_ENV;
+    originalNodeEnv = process.env.NODE_ENV;
+    // Enable telemetry — these tests need initTelemetry() to actually flip
+    // _enabled to true so they can assert on the sent payloads. Clearing
+    // BUN_ENV/NODE_ENV lets the test-env guard in initTelemetry pass.
     delete process.env.SPAWN_TELEMETRY;
+    delete process.env.BUN_ENV;
+    delete process.env.NODE_ENV;
     // Mock fetch to capture PostHog payloads
     fetchMock = mock(() => Promise.resolve(new Response("ok")));
     global.fetch = fetchMock;
@@ -122,6 +131,16 @@ describe("telemetry", () => {
       process.env.SPAWN_TELEMETRY = originalTelemetry;
     } else {
       delete process.env.SPAWN_TELEMETRY;
+    }
+    if (originalBunEnv !== undefined) {
+      process.env.BUN_ENV = originalBunEnv;
+    } else {
+      delete process.env.BUN_ENV;
+    }
+    if (originalNodeEnv !== undefined) {
+      process.env.NODE_ENV = originalNodeEnv;
+    } else {
+      delete process.env.NODE_ENV;
     }
   });
 
@@ -408,9 +427,93 @@ describe("telemetry", () => {
 
       mod.captureWarning("should not send");
       mod.captureError("test", new Error("should not send"));
+      mod.captureEvent("should_not_send", {
+        spawn_id: "abc",
+      });
       await flushAndWait();
 
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("does not send events when BUN_ENV=test (CI guard)", async () => {
+      process.env.BUN_ENV = "test";
+
+      const mod = await import("../shared/telemetry.js");
+      mod.initTelemetry("0.0.0-test");
+      await drainStaleEvents();
+
+      mod.captureEvent("funnel_started", {
+        agent: "claude",
+      });
+      mod.captureError("test", new Error("ci"));
+      await flushAndWait();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("does not send events when NODE_ENV=test (CI guard)", async () => {
+      process.env.NODE_ENV = "test";
+
+      const mod = await import("../shared/telemetry.js");
+      mod.initTelemetry("0.0.0-test");
+      await drainStaleEvents();
+
+      mod.captureEvent("funnel_started", {
+        agent: "claude",
+      });
+      await flushAndWait();
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("captureEvent", () => {
+    it("emits a batched event with the given name and properties", async () => {
+      const mod = await import("../shared/telemetry.js");
+      mod.initTelemetry("1.2.3-test");
+      await drainStaleEvents();
+
+      mod.captureEvent("funnel_started", {
+        fast_mode: true,
+        elapsed_ms: 0,
+      });
+      await flushAndWait();
+
+      const body = getLastBatchBody(fetchMock);
+      expect(body).not.toBeNull();
+      const evt = body?.batch[0];
+      expect(evt?.event).toBe("funnel_started");
+      expect(evt?.properties.fast_mode).toBe(true);
+      expect(evt?.properties.elapsed_ms).toBe(0);
+      expect(evt?.properties.spawn_version).toBe("1.2.3-test");
+    });
+
+    it("scrubs string property values but leaves non-strings alone", async () => {
+      const mod = await import("../shared/telemetry.js");
+      mod.initTelemetry("1.2.3-test");
+      await drainStaleEvents();
+
+      mod.captureEvent("spawn_connected", {
+        spawn_id: "abc123",
+        note: "contact me at alice@example.com about sk-or-v1-1234567890abcdef",
+        connect_count: 5,
+        lifetime_hours: 3.5,
+      });
+      await flushAndWait();
+
+      const body = getLastBatchBody(fetchMock);
+      const props = body?.batch[0]?.properties;
+      // Non-string values pass through untouched.
+      expect(props?.spawn_id).toBe("abc123");
+      expect(props?.connect_count).toBe(5);
+      expect(props?.lifetime_hours).toBe(3.5);
+      // String values get scrubbed.
+      const rawNote = props?.note;
+      const note = isString(rawNote) ? rawNote : "";
+      expect(note).toContain("[REDACTED_EMAIL]");
+      expect(note).not.toContain("alice@example.com");
+      expect(note).toContain("[REDACTED_KEY]");
+      expect(note).not.toContain("sk-or-v1-1234567890abcdef");
     });
   });
 });
