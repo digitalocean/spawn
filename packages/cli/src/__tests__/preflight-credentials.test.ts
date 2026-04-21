@@ -1,18 +1,19 @@
 import type { Manifest } from "../manifest";
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { preflightCredentialCheck } from "../commands/index.js";
+import * as shared from "../commands/shared.js";
 import { mockClackPrompts } from "./test-helpers";
 
 // Must be called before dynamic imports that use @clack/prompts
 const clack = mockClackPrompts();
 
-function makeManifest(cloudAuth: string): Manifest {
+function makeManifest(cloudAuth: string, cloudKey = "testcloud"): Manifest {
   return {
     agents: {},
     clouds: {
-      testcloud: {
-        name: "Test Cloud",
+      [cloudKey]: {
+        name: cloudKey === "digitalocean" ? "DigitalOcean" : "Test Cloud",
         description: "A test cloud",
         price: "test",
         url: "https://test.cloud",
@@ -114,5 +115,36 @@ describe("preflightCredentialCheck", () => {
     clearEnv("OPENROUTER_API_KEY");
     await preflightCredentialCheck(makeManifest("none"), "testcloud");
     expect(clack.logWarn.mock.calls.length).toBe(0);
+  });
+
+  describe("digitalocean + TTY gating", () => {
+    let isTTYSpy: ReturnType<typeof spyOn>;
+
+    beforeEach(() => {
+      isTTYSpy = spyOn(shared, "isInteractiveTTY");
+    });
+
+    afterEach(() => {
+      isTTYSpy.mockRestore();
+    });
+
+    it("skips warnings when interactive (guided checklist supplies credentials)", async () => {
+      isTTYSpy.mockReturnValue(true);
+      clearEnv("OPENROUTER_API_KEY");
+      clearEnv("DIGITALOCEAN_ACCESS_TOKEN");
+      await preflightCredentialCheck(makeManifest("DIGITALOCEAN_ACCESS_TOKEN", "digitalocean"), "digitalocean");
+      expect(clack.logWarn.mock.calls.length).toBe(0);
+    });
+
+    it("still warns when not interactive", async () => {
+      isTTYSpy.mockReturnValue(false);
+      clearEnv("OPENROUTER_API_KEY");
+      clearEnv("DIGITALOCEAN_ACCESS_TOKEN");
+      await preflightCredentialCheck(makeManifest("DIGITALOCEAN_ACCESS_TOKEN", "digitalocean"), "digitalocean");
+      expect(clack.logWarn.mock.calls.length).toBeGreaterThan(0);
+      const warnText = String(clack.logWarn.mock.calls[0]?.[0] ?? "");
+      expect(warnText).toContain("Missing credentials");
+      expect(warnText).toMatch(/DIGITALOCEAN_ACCESS_TOKEN|OPENROUTER_API_KEY/);
+    });
   });
 });
