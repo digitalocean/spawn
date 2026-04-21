@@ -69,19 +69,6 @@ bash <(curl -fsSL https://openrouter.ai/labs/spawn/digitalocean/pi.sh)
 | `SPAWN_JSON_READINESS` | Set to `1` with `SPAWN_NON_INTERACTIVE=1` to print machine-readable JSON when readiness is blocked | — |
 | `SPAWN_CLI_DIR` | Absolute path to the Spawn repo root when developing locally — makes the cloud shim run `packages/cli/src/{cloud}/main.ts` instead of downloading a release bundle | — |
 
-### Reset local state
-
-To drop saved DigitalOcean and OpenRouter credentials and optional shell variables while developing or testing, use [`reset-local-state.sh`](reset-local-state.sh). It deletes `~/.config/spawn/digitalocean.json` and `~/.config/spawn/openrouter.json`.
-
-```bash
-# Remove the saved token files (enough for a clean OAuth/API flow next run)
-bash sh/digitalocean/reset-local-state.sh
-
-# Also clear DO/OpenRouter-related env vars in this shell (bash: source; otherwise paste the
-# `unset` line printed when you run the script without sourcing).
-source sh/digitalocean/reset-local-state.sh
-```
-
 ### Pre-flight readiness
 
 Before region/size selection, the CLI checks DigitalOcean account state (`GET /v2/account`), SSH keys registered on your account, and OpenRouter credentials. If something blocks deployment (unverified email, locked or warning billing status, droplet quota, missing SSH registration, or invalid OpenRouter key), you get guided steps and a readiness checklist. Billing issues open the add-payment flow: `https://cloud.digitalocean.com/account/billing?defer-onboarding-for=or&open-add-payment-method=true`.
